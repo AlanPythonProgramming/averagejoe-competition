@@ -1,0 +1,96 @@
+<div align="center">
+
+# Average Joe
+
+**A superhuman [generals.io](https://generals.io) bot, trained from scratch with self-play reinforcement learning.**
+
+*“Its ability to flow army in complex situations is phenomenal.”*
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white&style=flat-square)](https://www.python.org/)
+[![JAX](https://img.shields.io/badge/JAX-5e35b1?style=flat-square)](https://github.com/jax-ml/jax)
+[![Equinox](https://img.shields.io/badge/Equinox-d8973c?style=flat-square)](https://github.com/patrick-kidger/equinox)
+[![generals.io rank #1](https://img.shields.io/badge/generals.io-%231%20on%20ladder-e23a3a?style=flat-square)](https://generals.io/profiles/Average%20Joe)
+
+<p align="center">
+  <img src="assets/game1.webp" width="250" alt="Self-play game 1" />
+  <img src="assets/game2.webp" width="250" alt="Self-play game 2" />
+  <img src="assets/game3.webp" width="250" alt="Self-play game 3" />
+</p>
+
+</div>
+
+---
+
+Average Joe is a bot for [generals.io](https://generals.io) — a real-time, fog-of-war
+strategy game — that taught itself to play at a **superhuman** level, from zero, through
+millions of games against itself.
+
+- 🏆 **Superhuman, from scratch** — trained purely by self-play; it never sees a human game.
+- 🔥 **Blazing-fast simulator** — runs on [**generals-bots**](https://github.com/strakam/generals-bots), a fully-vectorized JAX environment.
+- 🔁 **Fully reproducible** — one config and one command reproduce the released agent end to end.
+- 🛠️ **Powered by [JAX](https://github.com/jax-ml/jax) + [Equinox](https://github.com/patrick-kidger/equinox)** — a small, pure-functional, JIT-compiled training loop.
+
+## 📊 Results
+
+In its first **1,000 ranked games** on the [generals.io](https://generals.io) 1v1 ladder, Average Joe won **81.5%** and finished as the **#1-rated player** — ahead of the strongest human and well clear of the prior AI state of the art.
+
+<p align="center">
+  <img src="assets/leaderboard.png" width="780" alt="generals.io 1v1 leaderboard: Average Joe leads on OpenSkill rating" />
+</p>
+
+## 🎮 Watch it play
+
+Average Joe competes on the [generals.io](https://generals.io) 1v1 ladder — watch its live games and replays:
+
+- [Average Joe](https://generals.io/profiles/Average%20Joe)
+- [L_7d_gae90_30k_ema](https://generals.io/profiles/L_7d_gae90_30k_ema)
+
+## 🧠 Architecture
+
+<p align="center">
+  <img src="assets/architecture.png" width="820" alt="Average Joe network architecture" />
+</p>
+
+The board — plus a short history of each player's army and land — is encoded as tokens and
+run through a small transformer with two heads: one picks the move, the other estimates who
+is winning.
+
+- **Policy–value transformer** — pre-norm self-attention over board + temporal tokens; emits per-cell move logits and a distributional (HL-Gauss) value. &nbsp;·&nbsp; `networks/transformer.py`
+- **Self-play PPO** — one network plays both sides; GAE, top-k advantage filtering, EMA weights for evaluation. &nbsp;·&nbsp; `train/ppo.py`
+
+## 📦 Install
+
+Requires Python ≥ 3.11 and a [JAX](https://docs.jax.dev/en/latest/installation.html) build
+for your accelerator (CPU/GPU/TPU).
+
+```bash
+pip install -e .
+```
+
+Average Joe runs on the [`generals-bots`](https://github.com/strakam/generals-bots)
+environment (the `generals.core.*` package — the vectorized game, observations, and reward
+functions), a **separate, non-PyPI** package. Install it from source and make it importable
+before running.
+
+## 🚀 Train
+
+```bash
+python main.py --config configs/custom/L_7d_gae90.yaml
+```
+
+`L_7d_gae90` is the config behind the released agent. Checkpoints (a regular and an EMA copy)
+are written to `checkpoints/<run_name>/`, alongside the exact config that produced them. Any
+`Config` field can be overridden on the CLI, e.g. `--num_envs 256`. `configs/` also holds
+map-size presets (`S` / `M` / `L` / `default`).
+
+## 🕹️ Evaluate / play
+
+```bash
+python evals/eval.py                                       # vs a random opponent (pygame)
+python evals/eval_selfplay.py                              # the agent vs itself
+```
+
+## 📈 Logging (optional)
+
+Training logs to [Weights & Biases](https://wandb.ai) when a token is present at
+`.secrets/wandb_token.txt`; otherwise it runs console-only.

@@ -1,0 +1,16 @@
+[project]
+name = "average-joe"
+version = "0.1.0"
+description = "JAX/Equinox self-play PPO agent for generals.io"
+requires-python = ">=3.11"
+dependencies = [
+    "jax",
+    "jaxlib",
+    "equinox",
+    "optax",
+    "jaxtyping",
+    "ruamel.yaml",
+    "wandb",
+    "pygame",
+    "matplotlib",
+]
