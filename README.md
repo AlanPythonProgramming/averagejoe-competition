@@ -2,7 +2,7 @@
 
 # Average Joe
 
-**A superhuman [generals.io](https://generals.io) bot, trained from scratch with self-play reinforcement learning.**
+**The first superhuman [generals.io](https://generals.io) bot, trained from scratch with self-play reinforcement learning.**
 
 *“Its ability to flow army in complex situations is phenomenal.”*
 
