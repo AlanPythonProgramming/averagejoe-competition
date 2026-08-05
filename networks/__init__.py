@@ -1,6 +1,7 @@
 """Network architectures for generals.io PPO agent."""
 
 import inspect
+from functools import partial
 
 from networks import transformer, common
 from networks.transformer import HistoryTransformer, greedy_action_transformer
@@ -21,18 +22,31 @@ NETWORK_REGISTRY = {
 }
 
 
-def get_network_bundle(name: str) -> dict:
+def get_network_bundle(name: str, cfg=None) -> dict:
     """Look up a network bundle (cls + obs state functions) by name."""
     if name not in NETWORK_REGISTRY:
         available = ", ".join(NETWORK_REGISTRY.keys())
         raise ValueError(f"Unknown network '{name}'. Available: {available}")
-    return NETWORK_REGISTRY[name]
+    bundle = dict(NETWORK_REGISTRY[name])
+    if cfg is not None:
+        bundle["init_obs_state"] = partial(
+            common.init_obs_state,
+            history_size=cfg.history_size,
+            temporal_window=cfg.temporal_window,
+        )
+        bundle["augment_obs"] = partial(
+            common.augment_obs,
+            competition_features=cfg.competition_features,
+        )
+    return bundle
 
 
 # Config fields forwarded to a network constructor when present in its signature.
 _NET_CFG_FIELDS = [
     "depth", "embed_dim", "n_head", "ff_factor", "patch_size", "conv_dim",
     "use_bf16", "value_loss", "num_bins", "v_min", "v_max",
+    "history_size", "temporal_window", "temporal_hidden", "action_planes",
+    "competition_features",
 ]
 
 

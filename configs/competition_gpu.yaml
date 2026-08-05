@@ -1,0 +1,51 @@
+run_name: competition_gpu
+mode: competition
+pad_to: 21
+min_grid_size: 18
+max_grid_size: 21
+min_generals_distance: 17
+max_generals_distance: null
+truncation: 1200
+pool_size: 20000
+reset_pool_every: 25
+curriculum:
+  - {min_generals_distance: 2, max_generals_distance: 6}
+  - {win_rate_threshold: 0.60, min_generals_distance: 4, max_generals_distance: 8}
+  - {win_rate_threshold: 0.60, min_generals_distance: 6, max_generals_distance: 13}
+  - {win_rate_threshold: 0.60, min_generals_distance: 11, max_generals_distance: 17}
+  - {win_rate_threshold: 0.60, min_generals_distance: 17, max_generals_distance: null}
+network: history_transformer
+history_size: 4
+temporal_window: 64
+temporal_hidden: 256
+action_planes: 10
+competition_features: true
+depth: 4
+embed_dim: 256
+n_head: 8
+ff_factor: 3
+patch_size: 3
+use_bf16: true
+value_loss: mse
+num_envs: 128
+num_steps: 256
+num_iters: 100000
+minibatch_size: 1024
+num_epochs: 1
+gamma: 1.0
+gae_lambda: 0.9
+clip_eps: 0.2
+lr: 1.0e-4
+max_grad_norm: 0.3
+vf_coef: 0.5
+target_kl: 0.02
+adv_top_frac: 1.0
+ema_decay: 0.999
+ent_schedule: power_law
+ent_coef_start: 0.02
+ent_power: 0.2
+ent_coef_min: 0.002
+eval_every: 25
+eval_games: 256
+ckpt_every: 25
+save_every: 25

@@ -5,12 +5,11 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.core.game import get_observation
-from generals.core.action import compute_valid_move_mask
-
 from networks import (
     obs_to_array,
     reset_done_envs,
 )
+from networks.common import compute_action_mask
 
 
 # ---- Rollout (self-play) ----
@@ -41,7 +40,8 @@ def collect_rollout(states, env, network, key, num_steps, obs_state_p0, obs_stat
         # Concat both players: obs_to_array, masks, augment, network — single 2N batch
         obs_both = cat(obs_p0, obs_p1)
         obs_arr = jax.vmap(obs_to_array)(obs_both)
-        masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(obs_both)
+        masks = jax.vmap(lambda o: compute_action_mask(
+            o, network.action_planes, env.build_castles))(obs_both)
         obs_aug, new_osp = jax.vmap(augment_fn)(obs_arr, osp)
         obs_aug = obs_aug.astype(jnp.bfloat16)
 
@@ -107,7 +107,8 @@ def collect_rollout(states, env, network, key, num_steps, obs_state_p0, obs_stat
     boot_obs_p1 = jax.vmap(lambda s: get_observation(s, 1))(last_pre_reset)
     boot_obs = cat(boot_obs_p0, boot_obs_p1)
     boot_arr = jax.vmap(obs_to_array)(boot_obs)
-    boot_masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(boot_obs)
+    boot_masks = jax.vmap(lambda o: compute_action_mask(
+        o, network.action_planes, env.build_castles))(boot_obs)
     boot_aug, boot_osp = jax.vmap(augment_fn)(boot_arr, last_osp)
     boot_temporal = jnp.stack([boot_osp.opponent_army_history, boot_osp.opponent_land_history], axis=1)
 

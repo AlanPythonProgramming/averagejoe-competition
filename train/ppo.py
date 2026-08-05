@@ -8,11 +8,11 @@ import jax.numpy as jnp
 import jax.random as jrandom
 import equinox as eqx
 
-from generals.core.env import GeneralsEnv
 from train.rewards import win_lose_reward
 from train.rollout_selfplay import collect_rollout as collect_rollout_self
 from train.evaluations import periodic_eval, EvalCtx
 from evals.ref_eval import load_refs
+from train.environment import make_env
 
 
 # ---- GAE ----
@@ -102,7 +102,7 @@ def make_value_loss_fn(cfg):
 # ---- PPO ----
 
 
-def ppo_update(network, opt_state, batch, optimizer, key, clip_eps, vf_coef, ent_coef, minibatch_size, value_loss_fn, sample_idx, magnet_fn=None):
+def ppo_update(network, opt_state, batch, optimizer, key, clip_eps, vf_coef, ent_coef, minibatch_size, value_loss_fn, sample_idx):
     """One PPO epoch: shuffle sample indices, then lax.scan gathering minibatches on-the-fly."""
     obs, masks, temporal, actions, old_lps, advs, rets, train_mask = batch
     total = obs.shape[0] * obs.shape[1]
@@ -137,7 +137,7 @@ def ppo_update(network, opt_state, batch, optimizer, key, clip_eps, vf_coef, ent
 
         def loss_fn(net):
             def single_loss(o, m, td, a, old_lp, adv, ret):
-                _, val, lp, ent, val_aux, p_dist = net(o, m, td, None, a)
+                _, val, lp, ent, val_aux, _ = net(o, m, td, None, a)
                 log_ratio = lp - old_lp
                 ratio = jnp.exp(log_ratio)
                 # Standard PPO clipped objective
@@ -147,14 +147,11 @@ def ppo_update(network, opt_state, batch, optimizer, key, clip_eps, vf_coef, ent
                 value_loss = value_loss_fn(val_aux, ret)
                 clipped = (jnp.abs(ratio - 1.0) > clip_eps).astype(jnp.float32)
                 approx_kl = ratio - 1.0 - log_ratio
-                # Reverse KL toward magnet: KL(policy || magnet) = -H(p) - sum(p * log(m))
-                magnet_dist = magnet_fn(o, m)
-                magnet_kl = -ent - jnp.sum(p_dist * jnp.log(magnet_dist + 1e-10))
-                total = policy_loss + vf_coef * value_loss + ent_coef * magnet_kl
+                total = policy_loss + vf_coef * value_loss - ent_coef * ent
                 return total, {
                     "policy_loss": policy_loss, "value_loss": value_loss, "entropy": ent,
                     "clip_fraction": clipped, "approx_kl": approx_kl, "ratio": ratio,
-                    "log_ratio": log_ratio, "lp": lp, "old_lp": old_lp, "magnet_kl": magnet_kl,
+                    "log_ratio": log_ratio, "lp": lp, "old_lp": old_lp,
                 }
 
             all_losses, s = jax.vmap(single_loss)(
@@ -173,7 +170,6 @@ def ppo_update(network, opt_state, batch, optimizer, key, clip_eps, vf_coef, ent
                 "clip_fraction": s["clip_fraction"].mean(),
                 "approx_kl": s["approx_kl"].mean(),
                 "mean_ratio": s["ratio"].mean(),
-                "magnet_kl": s["magnet_kl"].mean(),
                 "max_kl": s["approx_kl"].max(),
                 "max_ratio": s["ratio"].max(),
                 "min_log_ratio": s["log_ratio"].min(),
@@ -220,6 +216,10 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     """Main PPO training loop with multi-GPU data parallelism via pmap."""
     num_envs = cfg.num_envs
     num_devices = jax.device_count()
+    def replicate(tree):
+        """Add the leading pmap axis (JAX 0.11 replacement for removed helper)."""
+        return jax.device_put(jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (num_devices, *x.shape)), tree))
     grid_size = cfg.pad_to
     current_gamma = cfg.gamma
     gamma_anneal = cfg.gamma_anneal_iters > 0 and cfg.gamma_end != cfg.gamma
@@ -234,8 +234,8 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
 
     # Partition network for pmap: array leaves are replicated, static captured in closures
     params, static = eqx.partition(network, eqx.is_array)
-    params = jax.device_put_replicated(params, jax.devices())
-    opt_state = jax.device_put_replicated(opt_state, jax.devices())
+    params = replicate(params)
+    opt_state = replicate(opt_state)
 
     # Per-device environment init
     def _init_envs(key):
@@ -249,8 +249,8 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     # Initialize per-network observation state (batched across envs, replicated across devices)
     single_state = init_obs_state_fn(grid_size, cfg.pad_to)
     batched_obs_state = jax.tree.map(lambda x: jnp.tile(x, (num_envs, *([1] * x.ndim))), single_state)
-    obs_state_p0 = jax.device_put_replicated(batched_obs_state, jax.devices())
-    obs_state_p1 = jax.device_put_replicated(batched_obs_state, jax.devices())
+    obs_state_p0 = replicate(batched_obs_state)
+    obs_state_p1 = replicate(batched_obs_state)
 
     # Per-device PRNG keys
     keys = jrandom.split(key, num_devices)
@@ -258,7 +258,7 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     # ---- pmap wrappers (closures over static args) ----
 
     # Replicate pool across devices for rollout
-    pool_rep = jax.device_put_replicated(pool, jax.devices())
+    pool_rep = replicate(pool)
 
     def _rollout_self(params, states, key, osp0, osp1, pool_r, gamma):
         network = eqx.combine(params, static)
@@ -279,14 +279,11 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
         std = jnp.sqrt(jnp.maximum(mean_sq - mean ** 2, 0.0))
         return (advs - mean) / (std + 1e-8)
 
-    from train.magnet import expander_magnet
-    magnet_fn = expander_magnet
-
     def _ppo_step(params, opt_state, batch, key, ent_coef, sample_idx):
         network = eqx.combine(params, static)
         network, opt_state, result = ppo_update(
             network, opt_state, batch, optimizer, key,
-            cfg.clip_eps, cfg.vf_coef, ent_coef, cfg.minibatch_size, value_loss_fn, sample_idx, magnet_fn=magnet_fn)
+            cfg.clip_eps, cfg.vf_coef, ent_coef, cfg.minibatch_size, value_loss_fn, sample_idx)
         new_params, _ = eqx.partition(network, eqx.is_array)
         result = jax.lax.pmean(result, axis_name='devices')
         return new_params, opt_state, result
@@ -307,11 +304,14 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     n_keep = int(per_device_total * cfg.adv_top_frac)
     n_keep = (n_keep // cfg.minibatch_size) * cfg.minibatch_size
 
-    @jax.pmap
-    def _compute_top_idx(advs):
-        flat_advs = advs.reshape(-1)
-        _, top_idx = jax.lax.top_k(jnp.abs(flat_advs), n_keep)
-        return top_idx
+    if cfg.adv_top_frac >= 1.0:
+        _compute_top_idx = jax.pmap(lambda advs: jnp.arange(advs.size, dtype=jnp.int32))
+    else:
+        @jax.pmap
+        def _compute_top_idx(advs):
+            flat_advs = advs.reshape(-1)
+            _, top_idx = jax.lax.top_k(jnp.abs(flat_advs), n_keep)
+            return top_idx
 
     # Multi-stage curriculum
     curriculum_stages = cfg.curriculum_stages or []
@@ -327,18 +327,16 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     else:
         ema_params = jax.tree.map(lambda x: x[0].copy(), params)  # init from device 0
 
-    # Separate env + pool for eval
-    eval_env = GeneralsEnv(
-        min_grid_size=env.min_grid_size, max_grid_size=env.max_grid_size,
-        pad_to=env.pad_to, min_generals_distance=env.min_generals_distance,
-        max_generals_distance=env.max_generals_distance,
-        truncation=env.truncation, castle_val_range=env.castle_val_range,
-        num_cities_range=env.num_cities_range,
-        mountain_density_range=env.mountain_density_range,
-        pool_size=1000,
+    # Separate env + pool for eval, preserving every competition modifier.
+    eval_env = make_env(
+        cfg, pool_size=cfg.eval_pool_size,
+        distance=(env.min_generals_distance, env.max_generals_distance),
     )
-    key, eval_env_key = jrandom.split(key)
-    eval_pool, _ = eval_env.reset(eval_env_key)
+    if cfg.eval_every > 0 or cfg.eval_every_after > 0:
+        key, eval_env_key = jrandom.split(key)
+        eval_pool, _ = eval_env.reset(eval_env_key)
+    else:
+        eval_pool = pool
 
     # Reference ELO eval setup
     ref_agents = None
@@ -356,16 +354,7 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
             ref_h2h = {}
         _ref_cfg = copy.copy(cfg)
         _ref_cfg.truncation = cfg.ref_eval_truncation or cfg.truncation
-        ref_eval_env = GeneralsEnv(
-            min_grid_size=cfg.ref_eval_min_grid_size or cfg.min_grid_size,
-            max_grid_size=cfg.ref_eval_max_grid_size or cfg.max_grid_size,
-            pad_to=cfg.pad_to,
-            min_generals_distance=cfg.ref_eval_min_generals_distance,
-            max_generals_distance=cfg.ref_eval_max_generals_distance,
-            truncation=_ref_cfg.truncation,
-            num_cities_range=(cfg.ref_eval_num_cities_min, cfg.ref_eval_num_cities_max),
-            castle_val_range=(cfg.ref_eval_castle_val_min, cfg.ref_eval_castle_val_max),
-        )
+        ref_eval_env = make_env(_ref_cfg, pool_size=1000, exact_competition=(cfg.mode == "competition"))
         key, _rpool_key = jrandom.split(key)
         ref_eval_pool, _ = ref_eval_env.reset(_rpool_key)
         print(f"REF_EVAL: {len(ref_agents)} refs, {cfg.ref_eval_games} games/side")
@@ -380,7 +369,11 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
     mode_str = "self-play"
     print(f"Training ({mode_str}, {num_devices} device(s))...")
     train_start = time.time()
+    best_eval_wr = -1.0
     for it in range(cfg.num_iters):
+        if it > 0 and cfg.max_train_hours > 0 and time.time() - train_start >= cfg.max_train_hours * 3600:
+            print(f"Reached wall-clock limit of {cfg.max_train_hours:.2f} hours")
+            break
         # Eval (before training so it==0 gives a baseline)
         network = _get_network()
         on_last_stage = curriculum_stages and current_stage_idx >= len(curriculum_stages) - 1
@@ -388,6 +381,13 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
         eval_ran, last_eval_wr, key = periodic_eval(
             it, cfg, eval_freq, network, ema_params, static,
             eval_env, eval_pool, ev, logger, key, last_eval_wr)
+        if eval_ran and last_eval_wr > best_eval_wr:
+            best_eval_wr = last_eval_wr
+            eqx.tree_serialise_leaves(
+                os.path.join(ckpt_dir, f"{run_name}_best.eqx"), network)
+            eqx.tree_serialise_leaves(
+                os.path.join(ckpt_dir, f"{run_name}_best_ema.eqx"),
+                eqx.combine(ema_params, static))
 
         t0 = time.time()
 
@@ -405,30 +405,23 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
                 if stage.castle_val_min is not None:
                     env.castle_val_range = (stage.castle_val_min, stage.castle_val_max)
                 if stage.num_cities_min is not None:
-                    env.num_cities_range = (stage.num_cities_min, stage.num_cities_max)
+                    env.num_castles_range = (stage.num_cities_min, stage.num_cities_max)
                 # Regenerate pool with new params (pool generator recompiles, rollout does NOT)
                 key, pool_key = jrandom.split(key)
                 pool, _ = env.reset(pool_key)
-                pool_rep = jax.device_put_replicated(pool, jax.devices())
+                pool_rep = replicate(pool)
                 # New eval env (new object forces JIT retrace of evaluate())
-                castle = (stage.castle_val_min, stage.castle_val_max) if stage.castle_val_min is not None else eval_env.castle_val_range
-                cities = (stage.num_cities_min, stage.num_cities_max) if stage.num_cities_min is not None else eval_env.num_cities_range
-                eval_env = GeneralsEnv(
-                    min_grid_size=eval_env.min_grid_size, max_grid_size=eval_env.max_grid_size,
-                    pad_to=eval_env.pad_to, min_generals_distance=stage.min_generals_distance,
-                    max_generals_distance=stage.max_generals_distance,
-                    truncation=eval_env.truncation, castle_val_range=castle,
-                    num_cities_range=cities,
-                    mountain_density_range=eval_env.mountain_density_range,
-                    pool_size=eval_env.pool_size,
+                eval_env = make_env(
+                    cfg, pool_size=cfg.eval_pool_size,
+                    distance=(stage.min_generals_distance, stage.max_generals_distance),
                 )
                 key, eval_pool_key = jrandom.split(key)
                 eval_pool, _ = eval_env.reset(eval_pool_key)
                 # Re-init env states from new pool
                 key, reinit_key = jrandom.split(key)
                 states = p_init_envs(jrandom.split(reinit_key, num_devices))
-                obs_state_p0 = jax.device_put_replicated(batched_obs_state, jax.devices())
-                obs_state_p1 = jax.device_put_replicated(batched_obs_state, jax.devices())
+                obs_state_p0 = replicate(batched_obs_state)
+                obs_state_p1 = replicate(batched_obs_state)
                 # Update gamma if specified (traced, no recompile needed)
                 if stage.gamma is not None:
                     current_gamma = stage.gamma
@@ -438,7 +431,7 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
         if cfg.reset_pool_every > 0 and it > 0 and it % cfg.reset_pool_every == 0:
             key, pool_key = jrandom.split(key)
             pool, _ = env.reset(pool_key)
-            pool_rep = jax.device_put_replicated(pool, jax.devices())
+            pool_rep = replicate(pool)
 
         # Gamma annealing: update current_gamma (traced through rollout + GAE, no recompile)
         if gamma_anneal:
@@ -580,7 +573,6 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
             "train/policy_loss": m["policy_loss"],
             "train/value_loss": m["value_loss"],
             "train/entropy": m["entropy"],
-            "train/magnet_kl": m["magnet_kl"],
             "train/n_actions": jnp.exp(m["entropy"]),
             "train/clip_fraction": m["clip_fraction"],
             "train/approx_kl": m["approx_kl"],
@@ -636,6 +628,11 @@ def train(env, pool, network, optimizer, opt_state, logger, key, cfg, bundle, ck
         if (it + 1) % cfg.ckpt_every == 0:
             ema_ckpt_path = os.path.join(ckpt_dir, f"{run_name}_ema_{it + 1}.eqx")
             eqx.tree_serialise_leaves(ema_ckpt_path, eqx.combine(ema_params, static))
+            eqx.tree_serialise_leaves(
+                os.path.join(ckpt_dir, f"{run_name}_latest.eqx"), network)
+            eqx.tree_serialise_leaves(
+                os.path.join(ckpt_dir, f"{run_name}_latest_ema.eqx"),
+                eqx.combine(ema_params, static))
 
         if (it + 1) % cfg.save_every == 0:
             path = os.path.join(ckpt_dir, f"{run_name}_{it + 1}.eqx")

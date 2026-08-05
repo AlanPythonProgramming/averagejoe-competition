@@ -29,8 +29,7 @@ import equinox as eqx
 import pygame
 
 from generals.core.game import get_observation, get_info, create_initial_state
-from generals.core.action import compute_valid_move_mask
-from generals.core.env import GeneralsEnv
+from networks.common import compute_action_mask
 from generals.core.config import Dimension
 from generals.core.rendering import JaxGameAdapter, JaxChannelsAdapter
 from generals.gui.properties import Properties, GuiMode
@@ -38,6 +37,7 @@ from generals.gui.rendering import Renderer
 
 from networks import obs_to_array
 from evals.agent import Agent, _safe_load_config
+from train.environment import make_env
 
 # Direction: 0=UP 1=DOWN 2=LEFT 3=RIGHT
 DIR_DELTA = {0: (-1, 0), 1: (1, 0), 2: (0, -1), 3: (0, 1)}
@@ -62,11 +62,8 @@ def _make_env(cfg):
         max_d = cfg.max_generals_distance
         cities = (cfg.num_cities_min, cfg.num_cities_max)
         castle = (cfg.castle_val_min, cfg.castle_val_max)
-    gs = cfg.eval_grid_size
-    return GeneralsEnv(grid_dims=(gs, gs), pad_to=cfg.pad_to,
-                       min_generals_distance=min_d, max_generals_distance=max_d,
-                       truncation=cfg.truncation, num_cities_range=cities,
-                       castle_val_range=castle)
+    return make_env(cfg, pool_size=cfg.eval_pool_size, distance=(min_d, max_d),
+                    exact_competition=(cfg.mode == "competition"))
 
 
 def _cache_visibility(adapter):
@@ -157,7 +154,7 @@ def run(agent, cfg, game_speed=2.0, seed=42, replay_grid=None, human_player=0):
     print("Warming up JIT...", end=" ", flush=True)
     _obs = get_observation(state, 1)
     _arr = obs_to_array(_obs)
-    _mask = compute_valid_move_mask(_obs.armies, _obs.owned_cells, _obs.mountains)
+    _mask = compute_action_mask(_obs, agent.network.action_planes, env.build_castles)
     _obs_st = agent.init_obs_state_fn(cfg.pad_to, cfg.pad_to)
     _aug, _obs_st = agent.augment_fn(_arr, _obs_st)
     _temporal = jnp.stack([_obs_st.opponent_army_history, _obs_st.opponent_land_history])
@@ -211,7 +208,7 @@ def run(agent, cfg, game_speed=2.0, seed=42, replay_grid=None, human_player=0):
         def _precompute_ai(state, obs_state_ai_snap, rng_key):
             obs_ai = get_observation(state, ai_idx)
             arr = obs_to_array(obs_ai)
-            mask = compute_valid_move_mask(obs_ai.armies, obs_ai.owned_cells, obs_ai.mountains)
+            mask = compute_action_mask(obs_ai, agent.network.action_planes, env.build_castles)
             aug, new_obs_state = agent.augment_fn(arr, obs_state_ai_snap)
             temporal = jnp.stack([new_obs_state.opponent_army_history,
                                   new_obs_state.opponent_land_history])

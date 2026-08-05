@@ -11,12 +11,11 @@ import jax.random as jrandom
 import equinox as eqx
 import optax
 
-from generals.core.env import GeneralsEnv
-
 from config import Config
 from networks import get_network_bundle, build_network
 from logger import Logger
 from train.ppo import train
+from train.environment import make_env
 
 
 def parse_args():
@@ -59,7 +58,7 @@ def main():
         if cli_val is not None:
             object.__setattr__(cfg, f.name, cli_val)
 
-    bundle = get_network_bundle(cfg.network)
+    bundle = get_network_bundle(cfg.network, cfg)
     NetworkClass = bundle["cls"]
     print(f"JAX PPO with {cfg.network} ({NetworkClass.__name__})")
     if cfg.min_grid_size != cfg.max_grid_size:
@@ -142,30 +141,17 @@ def main():
         run_name=run_name,
     )
 
-    env_kwargs = dict(
-        min_generals_distance=cfg.min_generals_distance,
-        max_generals_distance=cfg.max_generals_distance,
-        truncation=cfg.truncation,
-        pool_size=cfg.pool_size,
-        castle_val_range=(cfg.castle_val_min, cfg.castle_val_max),
-        num_cities_range=(cfg.num_cities_min, cfg.num_cities_max),
-        mountain_density_range=(cfg.mountain_density_min, cfg.mountain_density_max),
-    )
-    env = GeneralsEnv(
-        min_grid_size=cfg.min_grid_size,
-        max_grid_size=cfg.max_grid_size,
-        pad_to=cfg.pad_to,
-        **env_kwargs,
-    )
     stages = cfg.curriculum_stages
+    initial_distance = None
+    if stages:
+        initial_distance = (stages[0].min_generals_distance, stages[0].max_generals_distance)
+    env = make_env(cfg, distance=initial_distance)
     if stages:
         stage0 = stages[0]
-        env.min_generals_distance = stage0.min_generals_distance
-        env.max_generals_distance = stage0.max_generals_distance
         if stage0.castle_val_min is not None:
             env.castle_val_range = (stage0.castle_val_min, stage0.castle_val_max)
         if stage0.num_cities_min is not None:
-            env.num_cities_range = (stage0.num_cities_min, stage0.num_cities_max)
+            env.num_castles_range = (stage0.num_cities_min, stage0.num_cities_max)
         if stage0.gamma is not None:
             object.__setattr__(cfg, 'gamma', stage0.gamma)
         print(f"Curriculum: {len(stages)} stages")
@@ -174,7 +160,7 @@ def main():
             if s.gamma is not None:
                 extra += f", gamma={s.gamma}"
             wr_str = f"wr>={s.win_rate_threshold:.0%}" if i > 0 else "start"
-            print(f"  stage {i}: {wr_str} → dist={s.min_generals_distance}-{s.max_generals_distance}{extra}")
+            print(f"  stage {i}: {wr_str} -> dist={s.min_generals_distance}-{s.max_generals_distance}{extra}")
 
     key, pool_key = jrandom.split(key)
     pool, _ = env.reset(pool_key)

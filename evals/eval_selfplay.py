@@ -16,11 +16,10 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.core.game import get_observation
-from generals.core.action import compute_valid_move_mask
-from generals.core.env import GeneralsEnv
-
 from networks import obs_to_array
+from networks.common import compute_action_mask
 from evals.agent import Agent
+from train.environment import make_env
 
 
 def _make_eval_env(cfg):
@@ -36,11 +35,8 @@ def _make_eval_env(cfg):
         max_dist = cfg.max_generals_distance
         cities = (cfg.num_cities_min, cfg.num_cities_max)
         castle = (cfg.castle_val_min, cfg.castle_val_max)
-    gs = cfg.eval_grid_size
-    return GeneralsEnv(grid_dims=(gs, gs), pad_to=cfg.pad_to,
-                       min_generals_distance=min_dist, max_generals_distance=max_dist,
-                       truncation=cfg.truncation,
-                       num_cities_range=cities, castle_val_range=castle)
+    return make_env(cfg, pool_size=cfg.eval_pool_size, distance=(min_dist, max_dist),
+                    exact_competition=(cfg.mode == "competition"))
 
 
 def _play_one_game(state, env, pool, agent_p0, agent_p1, cfg, gui=None, fps=10):
@@ -54,11 +50,11 @@ def _play_one_game(state, env, pool, agent_p0, agent_p1, cfg, gui=None, fps=10):
         obs_p1 = get_observation(state, 1)
 
         obs_aug_p0, obs_state_p0 = agent_p0.augment_fn(obs_to_array(obs_p0), obs_state_p0)
-        mask_p0 = compute_valid_move_mask(obs_p0.armies, obs_p0.owned_cells, obs_p0.mountains)
+        mask_p0 = compute_action_mask(obs_p0, agent_p0.network.action_planes, env.build_castles)
         temporal_p0 = jnp.stack([obs_state_p0.opponent_army_history, obs_state_p0.opponent_land_history])
 
         obs_aug_p1, obs_state_p1 = agent_p1.augment_fn(obs_to_array(obs_p1), obs_state_p1)
-        mask_p1 = compute_valid_move_mask(obs_p1.armies, obs_p1.owned_cells, obs_p1.mountains)
+        mask_p1 = compute_action_mask(obs_p1, agent_p1.network.action_planes, env.build_castles)
         temporal_p1 = jnp.stack([obs_state_p1.opponent_army_history, obs_state_p1.opponent_land_history])
 
         action_p0 = agent_p0.greedy_fn(agent_p0.network, obs_aug_p0, mask_p0, temporal_p0)

@@ -13,6 +13,13 @@ from jaxtyping import Array
 
 from generals.core.action import compute_valid_move_mask
 
+MOVE_PLANES = 8
+BUILD_PLANE = 8
+PASS_PLANE_9 = 8
+PASS_PLANE_10 = 9
+BUILD_BASE_COST = 35
+BUILD_RADIUS = 6
+
 
 # ---- Observation state (for rich augmented networks) ----
 
@@ -70,7 +77,50 @@ def _max_pool_2d(x, window_size=3):
     return pooled[0, :, :]  # (H, W)
 
 
-def augment_obs(obs_arr, obs_state):
+def _build_cost_from_arrays(generals, castles, owned):
+    """Competition castle cost from a player's observable own structures."""
+    structures = ((generals > 0) | (castles > 0)) & (owned > 0)
+    h, w = structures.shape
+    padded = jnp.pad(structures.astype(jnp.float32), BUILD_RADIUS)
+    cost = jnp.full((h, w), float(BUILD_BASE_COST))
+    for di in range(-BUILD_RADIUS, BUILD_RADIUS + 1):
+        for dj in range(-BUILD_RADIUS, BUILD_RADIUS + 1):
+            surcharge = 14 - 2 * (abs(di) + abs(dj))
+            if surcharge > 0:
+                shifted = padded[BUILD_RADIUS + di:BUILD_RADIUS + di + h,
+                                 BUILD_RADIUS + dj:BUILD_RADIUS + dj + w]
+                cost = cost + surcharge * shifted
+    return cost
+
+
+def compute_build_cost_grid_obs(obs):
+    return _build_cost_from_arrays(obs.generals, obs.castles, obs.owned_cells)
+
+
+def compute_action_mask(obs, action_planes=10, build_enabled=True):
+    """Return legal per-plane actions, including canonical pass and builds."""
+    moves = jnp.transpose(
+        compute_valid_move_mask(
+            obs.armies, obs.owned_cells, obs.mountains | obs.structures_in_fog),
+        (2, 0, 1),
+    )
+    pass_mask = jnp.zeros((1, *obs.armies.shape), dtype=jnp.bool_).at[0, 0, 0].set(True)
+    if action_planes == 9:
+        return jnp.concatenate([moves, moves, pass_mask], axis=0)
+    if action_planes != 10:
+        raise ValueError(f"action_planes must be 9 or 10, got {action_planes}")
+    costs = compute_build_cost_grid_obs(obs)
+    build = (
+        obs.owned_cells
+        & ~obs.generals
+        & ~obs.castles
+        & (obs.armies >= costs)
+        & jnp.asarray(build_enabled)
+    )
+    return jnp.concatenate([moves, moves, build[None], pass_mask], axis=0)
+
+
+def augment_obs(obs_arr, obs_state, competition_features=True):
     """Augment raw observation with history and memory.
 
     Args:
@@ -78,7 +128,7 @@ def augment_obs(obs_arr, obs_state):
         obs_state: AugmentedObsState — single sample
 
     Returns:
-        augmented_obs: (24 + 2*history_size, pad_to, pad_to) float array
+        augmented_obs: (24 or 26 + 2*history_size, pad_to, pad_to) float array
         new_obs_state: AugmentedObsState
     """
     # Channel indices in obs_arr (from obs_to_array)
@@ -152,7 +202,7 @@ def augment_obs(obs_arr, obs_state):
     coords_x = jnp.broadcast_to(jnp.arange(p, dtype=jnp.float32)[None, :] / (p - 1), (p, p))
     coords_y = jnp.broadcast_to(jnp.arange(p, dtype=jnp.float32)[:, None] / (p - 1), (p, p))
 
-    # Build augmented observation (24 base channels)
+    # Build the original AverageJoe 24 base channels first.
     ones = jnp.ones((p, p))
     channels = jnp.stack([
         obs[armies],                                  # 0
@@ -180,6 +230,19 @@ def augment_obs(obs_arr, obs_state):
         coords_x,                                     # 22
         coords_y,                                     # 23
     ], axis=0)
+
+    if competition_features:
+        # Own structures are always visible, so the observation-derived price
+        # exactly matches the engine's authoritative dynamic build cost.
+        build_cost = _build_cost_from_arrays(
+            obs[generals_ch], obs[cities_ch], obs[owned_cells])
+        deathtouch_active = (
+            (obs[timestep_ch] >= 800).astype(jnp.float32) * ones)
+        channels = jnp.concatenate([
+            channels,
+            build_cost[None],
+            deathtouch_active[None],
+        ], axis=0)
 
     # Concatenate history stacks
     augmented_obs = jnp.concatenate([channels, new_army_stack, new_enemy_stack], axis=0)
@@ -236,7 +299,7 @@ def obs_to_array(obs):
 # ---- Action encoding/decoding ----
 
 
-def decode_action(idx, pad_to):
+def decode_action(idx, pad_to, action_planes=10):
     """Convert flat logit index to action array.
 
     Args:
@@ -249,13 +312,18 @@ def decode_action(idx, pad_to):
     gc = pad_to * pad_to
     d, pos = idx // gc, idx % gc
     r, c = pos // pad_to, pos % pad_to
-    is_pass = d == 8
+    pass_plane = PASS_PLANE_10 if action_planes == 10 else PASS_PLANE_9
+    is_build = (action_planes == 10) & (d == BUILD_PLANE)
+    is_pass = d == pass_plane
     is_half = (d >= 4) & (d < 8)
-    ad = jnp.where(is_pass, 0, jnp.where(is_half, d - 4, d))
-    return jnp.array([is_pass, r, c, ad, is_half], dtype=jnp.int32)
+    ad = jnp.where(is_pass | is_build, 0, jnp.where(is_half, d - 4, d))
+    kind = jnp.where(is_build, 2, jnp.where(is_pass, 1, 0))
+    r = jnp.where(is_pass, 0, r)
+    c = jnp.where(is_pass, 0, c)
+    return jnp.array([kind, r, c, ad, is_half], dtype=jnp.int32)
 
 
-def encode_action(action, pad_to):
+def encode_action(action, pad_to, action_planes=10):
     """Convert action array back to flat logit index.
 
     Args:
@@ -266,42 +334,44 @@ def encode_action(action, pad_to):
         scalar int32 index into (9 * pad_to * pad_to,) logit vector
     """
     gc = pad_to * pad_to
-    ip = action[0].astype(jnp.int32)
+    kind = action[0].astype(jnp.int32)
     r = action[1].astype(jnp.int32)
     c = action[2].astype(jnp.int32)
     d = action[3].astype(jnp.int32)
     ih = action[4].astype(jnp.int32)
-    ed = jnp.where(ip > 0, 8, jnp.where(ih > 0, d + 4, d))
-    return ed * gc + r * pad_to + c
+    pass_plane = PASS_PLANE_10 if action_planes == 10 else PASS_PLANE_9
+    ed = jnp.where(kind == 1, pass_plane,
+                   jnp.where((kind == 2) & (action_planes == 10), BUILD_PLANE,
+                             jnp.where(ih > 0, d + 4, d)))
+    pos = jnp.where(kind == 1, 0, r * pad_to + c)
+    return ed * gc + pos
 
 
 # ---- Mask and normalization ----
 
 
-def prepare_action_mask(direction_mask, pad_to, allow_pass=True):
-    """Pad direction mask and build 9-direction action penalty.
+def prepare_action_mask(action_mask, pad_to, allow_pass=True):
+    """Pad a per-plane boolean action mask and convert it to logit penalties.
 
     Args:
-        direction_mask: (H, W, 4) validity mask (1=valid, 0=invalid)
+        action_mask: (A, H, W) validity mask (1=valid, 0=invalid)
         pad_to: target spatial dimension
         allow_pass: if False, mask out the pass action
 
     Returns:
-        (9, pad_to, pad_to) penalty array (-1e9 for invalid, 0 for valid)
+        (A, pad_to, pad_to) penalty array (-1e9 for invalid, 0 for valid)
     """
-    mask_t = 1 - jnp.transpose(direction_mask, (2, 0, 1))
-    pad_h = pad_to - mask_t.shape[1]
-    pad_w = pad_to - mask_t.shape[2]
-    mask = jnp.pad(mask_t, ((0, 0), (0, pad_h), (0, pad_w)), constant_values=1)
-    full_mask = mask[:4]
-    half_mask = mask[:4]
-    pass_val = 0.0 if allow_pass else 1.0
-    pass_mask = jnp.full((1, pad_to, pad_to), pass_val)
-    return jnp.concatenate([full_mask, half_mask, pass_mask], axis=0) * -1e9
+    pad_h = pad_to - action_mask.shape[1]
+    pad_w = pad_to - action_mask.shape[2]
+    valid = jnp.pad(action_mask, ((0, 0), (0, pad_h), (0, pad_w)), constant_values=False)
+    pass_plane = valid.shape[0] - 1
+    valid = valid.at[pass_plane].set(
+        jnp.where(allow_pass, valid[pass_plane], jnp.zeros_like(valid[pass_plane])))
+    return jnp.where(valid, 0.0, -1e9)
 
 
-def normalize_observations(obs):
-    """Normalize augmented observation channels (24 + history).
+def normalize_observations(obs, competition_features=True):
+    """Normalize augmented observation channels (24/26 + history).
 
     For networks using AugmentedObsState (unet, simple_augmented_cnn, transformer).
     All divisors standardized to 50.
@@ -312,10 +382,13 @@ def normalize_observations(obs):
     Returns:
         normalized observation, same shape
     """
-    army_channels = [0, 1, 2, 3, 17, 19, 20] + list(range(24, obs.shape[0]))
+    history_start = 26 if competition_features else 24
+    army_channels = [0, 1, 2, 3, 17, 19, 20] + list(range(history_start, obs.shape[0]))
     obs = obs.at[jnp.array(army_channels)].divide(50.0)
     obs = obs.at[14].divide(50.0)
     obs = obs.at[jnp.array([16, 18])].divide(50.0)
+    if competition_features:
+        obs = obs.at[24].divide(100.0)
     return obs
 
 
@@ -330,14 +403,13 @@ def reset_done_envs(obs_state, dones):
     return jax.tree.map(reset_leaf, obs_state)
 
 
-def random_action(key, obs):
+def random_action(key, obs, action_planes=10, build_enabled=True):
     """Sample a random valid action for the opponent."""
-    mask = compute_valid_move_mask(obs.armies, obs.owned_cells, obs.mountains)
-    valid = jnp.argwhere(mask, size=100, fill_value=-1)
+    mask = compute_action_mask(obs, action_planes, build_enabled)
+    valid = jnp.argwhere(mask, size=10 * obs.armies.size, fill_value=-1)
     nv = jnp.sum(jnp.all(valid >= 0, axis=-1))
-    k1, k2 = jrandom.split(key)
-    should_pass = nv == 0
+    k1, _ = jrandom.split(key)
     idx = jnp.minimum(jrandom.randint(k1, (), 0, jnp.maximum(nv, 1)), nv - 1)
-    m = valid[idx]
-    ih = jrandom.randint(k2, (), 0, 2)
-    return jnp.array([should_pass, m[0], m[1], m[2], ih], dtype=jnp.int32)
+    plane, row, col = valid[idx]
+    flat = plane * obs.armies.size + row * obs.armies.shape[1] + col
+    return decode_action(flat, obs.armies.shape[1], action_planes)

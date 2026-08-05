@@ -154,12 +154,18 @@ class HistoryTransformer(eqx.Module):
     use_bf16: bool = eqx.field(static=True)
     num_bins: int = eqx.field(static=True)
     temporal_window: int = eqx.field(static=True)
+    action_planes: int = eqx.field(static=True)
+    competition_features: bool = eqx.field(static=True)
 
     def __init__(
         self,
         grid_size: int = 24,
         pad_to: int = None,
         history_size: int = 7,
+        temporal_window: int = 512,
+        temporal_hidden: int = 512,
+        action_planes: int = 10,
+        competition_features: bool = False,
         patch_size: int = 1,
         depth: int = 6,
         embed_dim: int = 256,
@@ -173,15 +179,14 @@ class HistoryTransformer(eqx.Module):
         *,
         key,
     ):
-        temporal_window = _TEMPORAL_WINDOW
-        temporal_hidden = _TEMPORAL_HIDDEN
-
         self.grid_size = grid_size
         self.pad_to = pad_to if pad_to is not None else grid_size
         self.patch_size = patch_size
-        self.n_channels = 24 + 2 * history_size
+        self.competition_features = competition_features
+        self.n_channels = (26 if competition_features else 24) + 2 * history_size
         self.use_bf16 = use_bf16
         self.temporal_window = temporal_window
+        self.action_planes = action_planes
 
         assert self.pad_to % patch_size == 0, \
             f"pad_to ({self.pad_to}) must be divisible by patch_size ({patch_size})"
@@ -205,7 +210,7 @@ class HistoryTransformer(eqx.Module):
         ]
 
         self.norm_out = eqx.nn.LayerNorm(embed_dim)
-        self.policy_head = eqx.nn.Linear(embed_dim, 9 * patch_size * patch_size, key=keys[3 + depth])
+        self.policy_head = eqx.nn.Linear(embed_dim, action_planes * patch_size * patch_size, key=keys[3 + depth])
 
         # Value head: scalar (MSE) or categorical bins (CE)
         self.num_bins = num_bins if value_loss == "ce" else 0
@@ -229,7 +234,7 @@ class HistoryTransformer(eqx.Module):
         p = self.pad_to
         M = self.patch_size
         gp = p // M  # grid of patches
-        obs_norm = normalize_observations(obs)
+        obs_norm = normalize_observations(obs, self.competition_features)
         mask_prep = prepare_action_mask(mask, p, allow_pass=allow_pass)  # float32 (contains -1e9)
 
         # Mixed precision: cast params and activations to bfloat16
@@ -270,12 +275,12 @@ class HistoryTransformer(eqx.Module):
             value = value_raw[0]
             value_aux = value  # scalar for MSE loss
 
-        # Policy head: per-patch logits, then unpatchify to (9, p, p)
-        patch_logits = jax.vmap(net.policy_head)(patch_embeddings)  # (n_patches, 9*M*M)
+        # Policy head: per-patch logits, then unpatchify to (A, p, p)
+        patch_logits = jax.vmap(net.policy_head)(patch_embeddings)
         if self.use_bf16:
             patch_logits = patch_logits.astype(jnp.float32)
-        action_logits = patch_logits.reshape(gp, gp, 9, M, M)
-        action_logits = action_logits.transpose(2, 0, 3, 1, 4).reshape(9, p, p)
+        action_logits = patch_logits.reshape(gp, gp, self.action_planes, M, M)
+        action_logits = action_logits.transpose(2, 0, 3, 1, 4).reshape(self.action_planes, p, p)
         action_logits = action_logits + mask_prep
         return action_logits.reshape(-1), value, value_aux
 
@@ -288,9 +293,9 @@ class HistoryTransformer(eqx.Module):
 
         if action is None:
             idx = jax.random.categorical(key, logits)
-            action = decode_action(idx, self.pad_to)
+            action = decode_action(idx, self.pad_to, self.action_planes)
         else:
-            idx = encode_action(action, self.pad_to)
+            idx = encode_action(action, self.pad_to, self.action_planes)
 
         lp = jax.nn.log_softmax(logits)
         logprob = lp[idx.astype(jnp.int32)]
@@ -305,4 +310,4 @@ class HistoryTransformer(eqx.Module):
 def greedy_action_transformer(network, obs, mask, temporal_data):
     """Select action greedily (argmax) for the transformer policy-value network."""
     logits, _, _ = network._forward(obs, mask, temporal_data)
-    return decode_action(jnp.argmax(logits), network.pad_to)
+    return decode_action(jnp.argmax(logits), network.pad_to, network.action_planes)

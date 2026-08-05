@@ -17,21 +17,14 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.core.game import get_observation
-from generals.core.action import compute_valid_move_mask
-from generals.core.env import GeneralsEnv
-
 from networks import obs_to_array, random_action
+from networks.common import compute_action_mask
 from evals.agent import Agent
+from train.environment import make_env
 
 
 def _make_eval_env(cfg):
-    return GeneralsEnv(
-        min_grid_size=cfg.min_grid_size, max_grid_size=cfg.max_grid_size,
-        pad_to=cfg.pad_to,
-        min_generals_distance=cfg.min_generals_distance,
-        max_generals_distance=cfg.max_generals_distance,
-        truncation=cfg.truncation,
-    )
+    return make_env(cfg, pool_size=cfg.eval_pool_size, exact_competition=(cfg.mode == "competition"))
 
 
 def run_headless(agent, num_games=50):
@@ -53,13 +46,13 @@ def run_headless(agent, num_games=50):
             obs_p1 = get_observation(state, 1)
 
             obs_arr = obs_to_array(obs_p0)
-            mask = compute_valid_move_mask(obs_p0.armies, obs_p0.owned_cells, obs_p0.mountains)
+            mask = compute_action_mask(obs_p0, agent.network.action_planes, env.build_castles)
             obs_augmented, obs_state = agent.augment_fn(obs_arr, obs_state)
             temporal = jnp.stack([obs_state.opponent_army_history, obs_state.opponent_land_history])
 
             key, k1 = jrandom.split(key)
             action_p0 = agent.greedy_fn(agent.network, obs_augmented, mask, temporal)
-            action_p1 = random_action(k1, obs_p1)
+            action_p1 = random_action(k1, obs_p1, agent.network.action_planes, env.build_castles)
 
             actions = jnp.stack([action_p0, action_p1])
             timestep, state = env.step(state, actions, pool)
@@ -114,13 +107,13 @@ def run_gui(agent, fps=10):
             obs_p1 = get_observation(state, 1)
 
             obs_arr = obs_to_array(obs_p0)
-            mask = compute_valid_move_mask(obs_p0.armies, obs_p0.owned_cells, obs_p0.mountains)
+            mask = compute_action_mask(obs_p0, agent.network.action_planes, env.build_castles)
             obs_augmented, obs_state = agent.augment_fn(obs_arr, obs_state)
             temporal = jnp.stack([obs_state.opponent_army_history, obs_state.opponent_land_history])
 
             key, k1 = jrandom.split(key)
             action_p0 = agent.greedy_fn(agent.network, obs_augmented, mask, temporal)
-            action_p1 = random_action(k1, obs_p1)
+            action_p1 = random_action(k1, obs_p1, agent.network.action_planes, env.build_castles)
 
             actions = jnp.stack([action_p0, action_p1])
             timestep, state = env.step(state, actions, pool)

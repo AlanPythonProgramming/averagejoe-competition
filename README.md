@@ -78,6 +78,28 @@ before running.
 python main.py --config configs/custom/L_7d_gae90.yaml
 ```
 
+### Competition baseline
+
+The competition port keeps simulation and PPO in JAX, then exports the trained
+policy to a CPU PyTorch submission:
+
+```bash
+python main.py --config configs/competition_cpu.yaml
+python export_torch.py checkpoints/competition_cpu/competition_cpu_best_ema.eqx \
+  --config configs/competition_cpu.yaml --output submission
+python eval_competition.py checkpoints/competition_cpu/competition_cpu_best_ema.eqx \
+  --config configs/competition_cpu.yaml --games 400
+python package_submission.py --source submission --output averagejoe_submission.zip
+python ../generals-bots/competition/matchup.py \
+  submission/run.sh ../generals-bots/competition/agents/expander_python/run.sh \
+  --mode competition
+```
+
+`competition_gpu.yaml` is the first accelerator configuration and
+`competition_full.yaml` scales to the published AverageJoe model size. The
+submission uses ten action planes, strict legality masks, dynamic castle costs,
+four board-delta frames, and 64-turn opponent score histories.
+
 `L_7d_gae90` is the config behind the released agent. Checkpoints (a regular and an EMA copy)
 are written to `checkpoints/<run_name>/`, alongside the exact config that produced them. Any
 `Config` field can be overridden on the CLI, e.g. `--num_envs 256`. `configs/` also holds

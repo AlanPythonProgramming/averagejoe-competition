@@ -1,6 +1,9 @@
 """Weights & Biases experiment logger for PPO training."""
 
-import wandb
+try:
+    import wandb
+except ImportError:  # console-only and competition environments need no W&B
+    wandb = None
 
 
 class Logger:
@@ -13,7 +16,7 @@ class Logger:
     def __init__(self, project: str | None, wandb_token: str | None = None,
                  hparams: dict | None = None, tags: list[str] | None = None,
                  run_name: str | None = None):
-        if project is not None and wandb_token is not None:
+        if project is not None and wandb_token is not None and wandb is not None:
             wandb.login(key=wandb_token)
             self.wb_run = wandb.init(
                 project=project.split("/")[-1] if "/" in project else project,

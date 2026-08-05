@@ -1,0 +1,72 @@
+run_name: competition_cpu
+mode: competition
+
+pad_to: 21
+min_grid_size: 18
+max_grid_size: 21
+min_generals_distance: 17
+max_generals_distance: null
+truncation: 1200
+mountain_density_min: 0.24
+mountain_density_max: 0.26
+castle_val_min: 20
+castle_val_max: 26
+num_cities_min: 9
+num_cities_max: 11
+
+pool_size: 4096
+reset_pool_every: 25
+curriculum:
+  - {min_generals_distance: 2, max_generals_distance: 6}
+  - {win_rate_threshold: 0.60, min_generals_distance: 4, max_generals_distance: 8}
+  - {win_rate_threshold: 0.60, min_generals_distance: 6, max_generals_distance: 13}
+  - {win_rate_threshold: 0.60, min_generals_distance: 11, max_generals_distance: 17}
+  - {win_rate_threshold: 0.60, min_generals_distance: 17, max_generals_distance: null}
+
+network: history_transformer
+history_size: 4
+temporal_window: 64
+temporal_hidden: 128
+action_planes: 10
+competition_features: true
+depth: 2
+embed_dim: 128
+n_head: 4
+ff_factor: 3
+patch_size: 3
+use_bf16: false
+value_loss: mse
+
+num_envs: 64
+num_steps: 128
+num_iters: 100000
+max_train_hours: 12.0
+minibatch_size: 2048
+num_epochs: 1
+seed: 44
+
+gamma: 1.0
+gae_lambda: 0.9
+clip_eps: 0.2
+lr: 1.0e-4
+lr_schedule: linear
+max_grad_norm: 0.3
+vf_coef: 0.5
+target_kl: 0.02
+adv_top_frac: 1.0
+ema_decay: 0.999
+
+ent_schedule: power_law
+ent_coef_start: 0.02
+ent_power: 0.2
+ent_coef_min: 0.002
+ent_coef_end: 0.002
+ent_coef_decay_iters: 5000
+
+eval_every: 25
+eval_games: 256
+eval_pool_size: 256
+ckpt_every: 25
+save_every: 25
+ref_eval_every: 0
+debug: false

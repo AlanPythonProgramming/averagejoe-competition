@@ -7,20 +7,61 @@ import equinox as eqx
 from typing import NamedTuple
 
 from generals.core.game import get_observation
-from generals.core.action import compute_valid_move_mask
 
 from networks import (
     obs_to_array,
     random_action,
     reset_done_envs,
 )
+from networks.common import compute_action_mask
 from evals.agent import Agent
 from evals.ref_eval import ref_eval
+from generals.core.action import DIRECTIONS, compute_valid_move_mask
 
 
-@jax.jit(static_argnames=["env", "truncation", "n_maps", "grid_size", "augment_fn", "reset_fn", "greedy_fn"])
+def competition_expander_action(obs, key):
+    """JAX-exact equivalent of competition/agents/expander_python."""
+    del key
+    h, w = obs.armies.shape
+    valid = compute_valid_move_mask(
+        obs.armies, obs.owned_cells, obs.mountains | obs.structures_in_fog)
+    positions = jnp.argwhere(valid, size=h * w * 4, fill_value=-1)
+    position_valid = jnp.all(positions >= 0, axis=-1)
+
+    def score(position):
+        r, c, direction = position
+        r = jnp.clip(r, 0, h - 1)
+        c = jnp.clip(c, 0, w - 1)
+        nr = jnp.clip(r + DIRECTIONS[direction, 0], 0, h - 1)
+        nc = jnp.clip(c + DIRECTIONS[direction, 1], 0, w - 1)
+        can_capture = obs.armies[r, c] > obs.armies[nr, nc] + 1
+        is_opp = obs.opponent_cells[nr, nc]
+        is_visible_neutral = obs.neutral_cells[nr, nc] & ~obs.fog_cells[nr, nc]
+        is_expansion = is_opp | is_visible_neutral
+        value = obs.armies[r, c].astype(jnp.float32)
+        value = jnp.where(is_expansion, value * 10.0, value)
+        value = jnp.where(is_opp, value * 2.0, value)
+        return jnp.where(can_capture, value, -1.0)
+
+    scores = jax.vmap(score)(positions)
+    best_idx = jnp.argmax(jnp.where(position_valid, scores, -1.0))
+    first_idx = jnp.argmax(position_valid)
+    has_capture = jnp.any(position_valid & (scores >= 0))
+    has_valid = jnp.any(position_valid)
+    choice = positions[jnp.where(has_capture, best_idx, first_idx)]
+    return jnp.array([
+        jnp.where(has_valid, 0, 1),
+        jnp.where(has_valid, choice[0], 0),
+        jnp.where(has_valid, choice[1], 0),
+        jnp.where(has_valid, choice[2], 0),
+        0,
+    ], dtype=jnp.int32)
+
+
+@jax.jit(static_argnames=["env", "truncation", "n_maps", "grid_size", "augment_fn", "reset_fn", "greedy_fn", "opponent_kind"])
 def evaluate(env, network, key, truncation, n_maps, grid_size,
-             obs_state, augment_fn, reset_fn, greedy_fn, pool=None):
+             obs_state, augment_fn, reset_fn, greedy_fn, pool=None,
+             opponent_kind="random"):
     """Play n_maps maps as both player positions vs random.
 
     Each map is played twice: once with network as p0, once as p1.
@@ -32,7 +73,8 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
     init_keys_arr = jnp.stack(init_keys)
 
     # ---- Forward: network=p0, random=p1 ----
-    states_fwd = jax.vmap(env.init_state)(init_keys_arr)
+    states_fwd = (jax.tree.map(lambda x: x[:n_maps], pool)
+                  if pool is not None else jax.vmap(env.init_state)(init_keys_arr))
 
     def scan_fwd(carry, _):
         states, rng, finished, net_won, net_lost, drew, obs_st = carry
@@ -40,13 +82,16 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         obs_p1 = jax.vmap(lambda s: get_observation(s, 1))(states)
 
         obs_arr = jax.vmap(obs_to_array)(obs_p0)
-        masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(obs_p0)
+        masks = jax.vmap(lambda o: compute_action_mask(o, network.action_planes, env.build_castles))(obs_p0)
         obs_aug, obs_st = jax.vmap(augment_fn)(obs_arr, obs_st)
         temporal = jnp.stack([obs_st.opponent_army_history, obs_st.opponent_land_history], axis=1)
         a0 = jax.vmap(greedy_fn, in_axes=(None, 0, 0, 0))(network, obs_aug, masks, temporal)
 
         rng, *ks = jrandom.split(rng, n_maps + 1)
-        a1 = jax.vmap(random_action)(jnp.stack(ks), obs_p1)
+        if opponent_kind == "expander":
+            a1 = jax.vmap(competition_expander_action)(obs_p1, jnp.stack(ks))
+        else:
+            a1 = jax.vmap(lambda k, o: random_action(k, o, network.action_planes, env.build_castles))(jnp.stack(ks), obs_p1)
 
         actions = jnp.stack([a0, a1], axis=1)
         timesteps, new_states = jax.vmap(step_fn)(states, actions)
@@ -55,7 +100,7 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         new_done = dones & ~finished
         net_won = net_won | (new_done & (timesteps.info.winner == 0))
         net_lost = net_lost | (new_done & (timesteps.info.winner == 1))
-        drew = drew | (new_done & timesteps.truncated & ~timesteps.terminated)
+        drew = drew | (new_done & (timesteps.info.winner < 0))
         finished = finished | dones
         obs_st = reset_done_envs(obs_st, dones)
 
@@ -66,7 +111,8 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         scan_fwd, (states_fwd, key_fwd, z, z, z, z, obs_state), None, length=truncation)
 
     # ---- Reverse: random=p0, network=p1 ----
-    states_rev = jax.vmap(env.init_state)(init_keys_arr)
+    states_rev = (jax.tree.map(lambda x: x[:n_maps], pool)
+                  if pool is not None else jax.vmap(env.init_state)(init_keys_arr))
 
     def scan_rev(carry, _):
         states, rng, finished, net_won, net_lost, drew, obs_st = carry
@@ -74,13 +120,16 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         obs_p1 = jax.vmap(lambda s: get_observation(s, 1))(states)
 
         obs_arr = jax.vmap(obs_to_array)(obs_p1)
-        masks = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(obs_p1)
+        masks = jax.vmap(lambda o: compute_action_mask(o, network.action_planes, env.build_castles))(obs_p1)
         obs_aug, obs_st = jax.vmap(augment_fn)(obs_arr, obs_st)
         temporal = jnp.stack([obs_st.opponent_army_history, obs_st.opponent_land_history], axis=1)
         a1 = jax.vmap(greedy_fn, in_axes=(None, 0, 0, 0))(network, obs_aug, masks, temporal)
 
         rng, *ks = jrandom.split(rng, n_maps + 1)
-        a0 = jax.vmap(random_action)(jnp.stack(ks), obs_p0)
+        if opponent_kind == "expander":
+            a0 = jax.vmap(competition_expander_action)(obs_p0, jnp.stack(ks))
+        else:
+            a0 = jax.vmap(lambda k, o: random_action(k, o, network.action_planes, env.build_castles))(jnp.stack(ks), obs_p0)
 
         actions = jnp.stack([a0, a1], axis=1)
         timesteps, new_states = jax.vmap(step_fn)(states, actions)
@@ -89,7 +138,7 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         new_done = dones & ~finished
         net_won = net_won | (new_done & (timesteps.info.winner == 1))
         net_lost = net_lost | (new_done & (timesteps.info.winner == 0))
-        drew = drew | (new_done & timesteps.truncated & ~timesteps.terminated)
+        drew = drew | (new_done & (timesteps.info.winner < 0))
         finished = finished | dones
         obs_st = reset_done_envs(obs_st, dones)
 
@@ -135,7 +184,7 @@ def periodic_eval(it, cfg, eval_freq, network, ema_params, static,
     vs-random eval runs (it drives curriculum advancement).
     """
     eval_ran = False
-    if it == 0 or (it + 1) % eval_freq == 0:
+    if eval_freq > 0 and (it == 0 or (it + 1) % eval_freq == 0):
         key, eval_key = jrandom.split(key)
         n_maps = cfg.eval_games // 2
         eval_obs_state = jax.tree.map(

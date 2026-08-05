@@ -14,3 +14,18 @@ dependencies = [
     "pygame",
     "matplotlib",
 ]
+
+[project.optional-dependencies]
+submission = ["torch", "safetensors"]
+test = ["pytest", "torch", "safetensors"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["config", "logger", "main", "export_torch", "eval_competition", "package_submission"]
+
+[tool.setuptools.packages.find]
+include = ["networks*", "train*", "evals*", "submission*"]
+exclude = ["tests*", "assets*", "configs*"]

@@ -1,0 +1,60 @@
+run_name: competition_full
+mode: competition
+pad_to: 21
+min_grid_size: 18
+max_grid_size: 21
+min_generals_distance: 17
+max_generals_distance: null
+truncation: 1200
+pool_size: 200000
+reset_pool_every: 20
+curriculum:
+  - {min_generals_distance: 2, max_generals_distance: 6}
+  - {win_rate_threshold: 0.60, min_generals_distance: 4, max_generals_distance: 8}
+  - {win_rate_threshold: 0.60, min_generals_distance: 6, max_generals_distance: 13}
+  - {win_rate_threshold: 0.60, min_generals_distance: 11, max_generals_distance: 17}
+  - {win_rate_threshold: 0.60, min_generals_distance: 17, max_generals_distance: null}
+network: history_transformer
+history_size: 7
+temporal_window: 512
+temporal_hidden: 512
+action_planes: 10
+competition_features: true
+depth: 7
+embed_dim: 448
+n_head: 8
+ff_factor: 3
+patch_size: 3
+use_bf16: true
+value_loss: ce
+num_bins: 128
+v_min: -1.0
+v_max: 1.0
+hl_sigma: 0.04
+num_envs: 512
+num_steps: 512
+num_iters: 100000
+minibatch_size: 1024
+num_epochs: 1
+gamma: 1.0
+gae_lambda: 0.9
+clip_eps: 0.2
+lr: 1.0e-4
+lr_schedule: power_law
+lr_power_law_numerator: 0.5
+lr_power_law_exponent: 1.1
+lr_power_law_min: 5.0e-6
+lr_power_law_max: 1.0e-4
+max_grad_norm: 0.267
+vf_coef: 0.5
+target_kl: 0.02
+adv_top_frac: 0.25
+ema_decay: 0.999
+ent_schedule: power_law
+ent_coef_start: 0.05
+ent_power: 0.2
+ent_coef_min: 0.001
+eval_every: 50
+eval_games: 512
+ckpt_every: 500
+save_every: 500

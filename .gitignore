@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
+.pytest_tmp/
 .env/
 .secrets/
 checkpoints/

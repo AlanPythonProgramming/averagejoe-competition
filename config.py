@@ -24,12 +24,16 @@ class Config:
     # Run
     run_name: str = "default"
 
+    # Ruleset. "competition" pins the live competition mechanics; "standard"
+    # preserves the original generals.io training setup.
+    mode: str = "standard"
+
     # Environment
     pad_to: int = 15
     min_grid_size: int = 15
     max_grid_size: int = 15
     min_generals_distance: int = 4
-    max_generals_distance: int = 8
+    max_generals_distance: Optional[int] = 8
     truncation: int = 512
     mountain_density_min: float = 0.18
     mountain_density_max: float = 0.26
@@ -48,11 +52,20 @@ class Config:
     patch_size: int = 1
     conv_dim: int = 256
     use_bf16: bool = False
+    history_size: int = 7
+    temporal_window: int = 512
+    temporal_hidden: int = 512
+    action_planes: int = 9
+    # Add competition-only build-cost and Deathtouch channels. Keep this false
+    # by default so original AverageJoe configs/checkpoints retain 24+2H input
+    # channels; competition configs opt in explicitly.
+    competition_features: bool = False
 
     # Rollouts
     num_envs: int = 2048
     num_steps: int = 512
     num_iters: int = 800
+    max_train_hours: float = 0.0  # 0 disables the wall-clock limit
     minibatch_size: int = 2048
     seed: int = 42
 
@@ -94,6 +107,7 @@ class Config:
     eval_every: int = 5
     eval_every_after: int = 0    # switch to this eval frequency on last curriculum stage (0 = no switch)
     eval_games: int = 128
+    eval_pool_size: int = 1000
     eval_ema_only: bool = False  # if True, eval/ref_eval use only EMA weights (skip current)
     ckpt_every: int = 10
 
@@ -127,7 +141,7 @@ class Config:
 
     @property
     def num_actions(self):
-        return 9 * self.pad_to * self.pad_to
+        return self.action_planes * self.pad_to * self.pad_to
 
     @property
     def curriculum_stages(self) -> Optional[List[CurriculumStage]]:

@@ -51,7 +51,7 @@ class Agent:
 
     @staticmethod
     def from_config(eqx_path, cfg):
-        bundle = get_network_bundle(cfg.network)
+        bundle = get_network_bundle(cfg.network, cfg)
         key = jrandom.PRNGKey(0)
 
         network = build_network(cfg, key)

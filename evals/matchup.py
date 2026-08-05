@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 from generals.core.game import get_observation
-from generals.core.action import compute_valid_move_mask
+from networks.common import compute_action_mask
 
 from networks import obs_to_array, reset_done_envs
 from evals.agent import Agent
@@ -60,13 +60,13 @@ def play_match(agent_a, agent_b, env, pool, num_games, truncation, key):
             obs_p1 = jax.vmap(lambda s: get_observation(s, 1))(states)
 
             obs_arr_a = jax.vmap(obs_to_array)(obs_p0)
-            masks_a = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(obs_p0)
+            masks_a = jax.vmap(lambda o: compute_action_mask(o, agent_a.network.action_planes, env.build_castles))(obs_p0)
             obs_aug_a, obs_state_a = jax.vmap(augment_fn_a)(obs_arr_a, obs_state_a)
             temporal_a = jnp.stack([obs_state_a.opponent_army_history, obs_state_a.opponent_land_history], axis=1)
             action_a = jax.vmap(action_fn_a, in_axes=(None, 0, 0, 0, 0))(net_a, obs_aug_a, masks_a, temporal_a, keys_a)
 
             obs_arr_b = jax.vmap(obs_to_array)(obs_p1)
-            masks_b = jax.vmap(lambda o: compute_valid_move_mask(o.armies, o.owned_cells, o.mountains))(obs_p1)
+            masks_b = jax.vmap(lambda o: compute_action_mask(o, agent_b.network.action_planes, env.build_castles))(obs_p1)
             obs_aug_b, obs_state_b = jax.vmap(augment_fn_b)(obs_arr_b, obs_state_b)
             temporal_b = jnp.stack([obs_state_b.opponent_army_history, obs_state_b.opponent_land_history], axis=1)
             action_b = jax.vmap(action_fn_b, in_axes=(None, 0, 0, 0, 0))(net_b, obs_aug_b, masks_b, temporal_b, keys_b)
