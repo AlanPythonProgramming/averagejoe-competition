@@ -17,6 +17,15 @@ from networks.common import compute_action_mask
 from evals.agent import Agent
 from evals.ref_eval import ref_eval
 from generals.core.action import DIRECTIONS, compute_valid_move_mask
+from generals.agents import HunterAgent
+
+
+_COMPETITION_HUNTER = HunterAgent(id="CompetitionHunter")
+
+
+def competition_hunter_action(obs, key):
+    """Use the pinned engine's aggressive Hunter policy for exact evaluation."""
+    return _COMPETITION_HUNTER.act(obs, key)
 
 
 def competition_expander_action(obs, key):
@@ -58,6 +67,32 @@ def competition_expander_action(obs, key):
     ], dtype=jnp.int32)
 
 
+def opponent_action(kind, obs, key, action_planes, build_enabled):
+    """Dispatch one JAX-native fixed opponent action."""
+    if kind == "hunter":
+        return competition_hunter_action(obs, key)
+    if kind == "expander":
+        return competition_expander_action(obs, key)
+    if kind == "random":
+        return random_action(key, obs, action_planes, build_enabled)
+    raise ValueError(f"unknown evaluation opponent: {kind}")
+
+
+def result_metrics(wins, losses, draws):
+    """Return match score, decisive win rate, and decisive fraction.
+
+    Match score awards 1 for a win, 0.5 for a draw, and 0 for a loss. It is a
+    useful diagnostic alongside the raw win rate used by the original
+    AverageJoe curriculum.
+    """
+    total = wins + losses + draws
+    decisive = wins + losses
+    score = (wins + 0.5 * draws) / max(total, 1)
+    decisive_wr = wins / max(decisive, 1)
+    decisive_fraction = decisive / max(total, 1)
+    return score, decisive_wr, decisive_fraction
+
+
 @jax.jit(static_argnames=["env", "truncation", "n_maps", "grid_size", "augment_fn", "reset_fn", "greedy_fn", "opponent_kind"])
 def evaluate(env, network, key, truncation, n_maps, grid_size,
              obs_state, augment_fn, reset_fn, greedy_fn, pool=None,
@@ -88,10 +123,10 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         a0 = jax.vmap(greedy_fn, in_axes=(None, 0, 0, 0))(network, obs_aug, masks, temporal)
 
         rng, *ks = jrandom.split(rng, n_maps + 1)
-        if opponent_kind == "expander":
-            a1 = jax.vmap(competition_expander_action)(obs_p1, jnp.stack(ks))
-        else:
-            a1 = jax.vmap(lambda k, o: random_action(k, o, network.action_planes, env.build_castles))(jnp.stack(ks), obs_p1)
+        a1 = jax.vmap(
+            lambda o, k: opponent_action(
+                opponent_kind, o, k, network.action_planes, env.build_castles)
+        )(obs_p1, jnp.stack(ks))
 
         actions = jnp.stack([a0, a1], axis=1)
         timesteps, new_states = jax.vmap(step_fn)(states, actions)
@@ -126,10 +161,10 @@ def evaluate(env, network, key, truncation, n_maps, grid_size,
         a1 = jax.vmap(greedy_fn, in_axes=(None, 0, 0, 0))(network, obs_aug, masks, temporal)
 
         rng, *ks = jrandom.split(rng, n_maps + 1)
-        if opponent_kind == "expander":
-            a0 = jax.vmap(competition_expander_action)(obs_p0, jnp.stack(ks))
-        else:
-            a0 = jax.vmap(lambda k, o: random_action(k, o, network.action_planes, env.build_castles))(jnp.stack(ks), obs_p0)
+        a0 = jax.vmap(
+            lambda o, k: opponent_action(
+                opponent_kind, o, k, network.action_planes, env.build_castles)
+        )(obs_p0, jnp.stack(ks))
 
         actions = jnp.stack([a0, a1], axis=1)
         timesteps, new_states = jax.vmap(step_fn)(states, actions)
@@ -180,8 +215,8 @@ def periodic_eval(it, cfg, eval_freq, network, ema_params, static,
                   eval_env, eval_pool, ev, logger, key, last_eval_wr):
     """Eval vs random (+ reference ELO) on eval iters; logs results.
 
-    Returns (eval_ran, last_eval_wr, key). last_eval_wr updates only when the
-    vs-random eval runs (it drives curriculum advancement).
+    Returns (eval_ran, last_eval_wr, key). ``last_eval_wr`` is raw wins divided
+    by all completed games, matching the original AverageJoe curriculum.
     """
     eval_ran = False
     if eval_freq > 0 and (it == 0 or (it + 1) % eval_freq == 0):
@@ -194,15 +229,69 @@ def periodic_eval(it, cfg, eval_freq, network, ema_params, static,
             eval_obs_state, ev.augment_fn, ev.reset_fn, ev.greedy_fn, pool=eval_pool)
         ew, el, ed, edone = int(ew), int(el), int(ed), int(edone)
         wb, lb, sp = int(wb), int(lb), int(sp)
+        match_score, decisive_wr, decisive_fraction = result_metrics(ew, el, ed)
         last_eval_wr = ew / max(edone, 1)
         eval_ran = True
-        print(f"  EVAL: {ew}W/{el}L/{ed}D ({last_eval_wr * 100:.0f}%) greedy vs random | Maps({n_maps}): {wb}WB/{lb}LB/{sp}S")
+        print(
+            f"  EVAL: {ew}W/{el}L/{ed}D vs random | "
+            f"WR={last_eval_wr:.0%}, score={match_score:.0%}, "
+            f"decisive WR={decisive_wr:.0%}, "
+            f"decisive={decisive_fraction:.0%} | "
+            f"Maps({n_maps}): {wb}WB/{lb}LB/{sp}S"
+        )
         logger.log_eval(it, ew, el, ed, edone)
         logger.log(it, {
+            "eval/match_score": match_score,
+            "eval/decisive_win_rate": decisive_wr,
+            "eval/decisive_fraction": decisive_fraction,
             "eval/won_both": wb / max(n_maps, 1),
             "eval/lost_both": lb / max(n_maps, 1),
             "eval/split": sp / max(n_maps, 1),
         })
+
+    strength_freq = cfg.strength_eval_every
+    strength_opponents = cfg.strength_eval_opponents or (
+        [cfg.strength_eval_opponent] if cfg.strength_eval_opponent else [])
+    if (strength_opponents and strength_freq > 0
+            and (it == 0 or (it + 1) % strength_freq == 0)):
+        for opponent_name in strength_opponents:
+            opponent = opponent_name.lower()
+            if opponent not in ("hunter", "expander", "random"):
+                raise ValueError(
+                    "strength opponents must be hunter, expander, or random")
+            key, strength_key = jrandom.split(key)
+            n_maps = cfg.strength_eval_games // 2
+            strength_obs_state = jax.tree.map(
+                lambda x: jnp.tile(x, (n_maps, *([1] * x.ndim))), ev.single_state)
+            strength_network = (
+                eqx.combine(ema_params, static)
+                if cfg.strength_eval_use_ema else network
+            )
+            sw, sl, sd, sdone, swb, slb, ssp, _ = evaluate(
+                eval_env, strength_network, strength_key, cfg.truncation, n_maps,
+                cfg.pad_to, strength_obs_state, ev.augment_fn, ev.reset_fn,
+                ev.greedy_fn, pool=eval_pool, opponent_kind=opponent)
+            sw, sl, sd, sdone = int(sw), int(sl), int(sd), int(sdone)
+            swb, slb, ssp = int(swb), int(slb), int(ssp)
+            match_score, decisive_wr, decisive_fraction = result_metrics(sw, sl, sd)
+            weights = "EMA" if cfg.strength_eval_use_ema else "current"
+            print(
+                f"  STRENGTH: {sw}W/{sl}L/{sd}D vs {opponent} ({weights}) | "
+                f"score={match_score:.0%}, decisive WR={decisive_wr:.0%}, "
+                f"decisive={decisive_fraction:.0%} | "
+                f"Maps({n_maps}): {swb}WB/{slb}LB/{ssp}S"
+            )
+            logger.log(it, {
+                f"strength/{opponent}_wins": sw,
+                f"strength/{opponent}_losses": sl,
+                f"strength/{opponent}_draws": sd,
+                f"strength/{opponent}_match_score": match_score,
+                f"strength/{opponent}_decisive_wr": decisive_wr,
+                f"strength/{opponent}_decisive_fraction": decisive_fraction,
+                f"strength/{opponent}_won_both": swb / max(n_maps, 1),
+                f"strength/{opponent}_lost_both": slb / max(n_maps, 1),
+                f"strength/{opponent}_split": ssp / max(n_maps, 1),
+            })
 
     if ev.ref_agents and (it == 0 or (it + 1) % cfg.ref_eval_every == 0):
         ema_network = eqx.combine(ema_params, static)

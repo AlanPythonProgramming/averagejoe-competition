@@ -46,6 +46,11 @@ ent_coef_start: 0.02
 ent_power: 0.2
 ent_coef_min: 0.002
 eval_every: 25
-eval_games: 256
+eval_games: 128
+eval_pool_size: 128
+strength_eval_opponents: [hunter, expander]
+strength_eval_every: 250
+strength_eval_games: 128
+strength_eval_use_ema: true
 ckpt_every: 25
 save_every: 25

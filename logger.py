@@ -33,10 +33,17 @@ class Logger:
             self.wb_run.log({k: float(v) for k, v in metrics.items()}, step=step)
 
     def log_eval(self, step: int, wins: int, losses: int, draws: int, total: int):
-        """Log evaluation win/draw rates."""
+        """Log raw rates plus draw-aware match and decisiveness metrics."""
         wr = wins / max(total, 1)
         dr = draws / max(total, 1)
-        self.log(step, {"eval/win_rate": wr, "eval/draw_rate": dr})
+        decisive = wins + losses
+        self.log(step, {
+            "eval/win_rate": wr,
+            "eval/draw_rate": dr,
+            "eval/match_score": (wins + 0.5 * draws) / max(total, 1),
+            "eval/decisive_win_rate": wins / max(decisive, 1),
+            "eval/decisive_fraction": decisive / max(total, 1),
+        })
 
     def finish(self):
         """Stop the W&B run."""

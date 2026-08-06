@@ -43,7 +43,11 @@ def collect_rollout(states, env, network, key, num_steps, obs_state_p0, obs_stat
         masks = jax.vmap(lambda o: compute_action_mask(
             o, network.action_planes, env.build_castles))(obs_both)
         obs_aug, new_osp = jax.vmap(augment_fn)(obs_arr, osp)
-        obs_aug = obs_aug.astype(jnp.bfloat16)
+        if network.use_bf16:
+            # Rollout observations dominate accelerator memory. Store them in
+            # BF16 only for mixed-precision models; CPU/float32 configs retain
+            # their requested precision.
+            obs_aug = obs_aug.astype(jnp.bfloat16)
 
         # Extract temporal data from obs state for network
         temporal = jnp.stack([new_osp.opponent_army_history, new_osp.opponent_land_history], axis=1)

@@ -14,6 +14,7 @@ from networks.common import (
 )
 from train.environment import make_env
 from train.ppo import compute_gae
+from train.evaluations import result_metrics
 from generals.core.game import create_initial_state, get_observation
 from generals.modifiers.build_castles import build_cost_grid
 
@@ -95,3 +96,11 @@ def test_gae_and_network_forward_are_finite():
     logits, value, _ = network._forward(obs, mask, temporal)
     assert logits.shape == (4410,)
     assert bool(jnp.all(jnp.isfinite(logits))) and bool(jnp.isfinite(value))
+
+
+def test_evaluation_metrics_report_draws_separately():
+    score, decisive_wr, decisive_fraction = result_metrics(85, 1, 170)
+    assert abs(score - 0.6640625) < 1e-9
+    assert decisive_wr > 0.98
+    assert abs(decisive_fraction - 86 / 256) < 1e-9
+    assert result_metrics(0, 0, 256)[0] == 0.5

@@ -1,4 +1,4 @@
-"""Fixed-seed, both-seat competition strength gate against Expander."""
+"""Fixed-seed, both-seat competition strength gate against a JAX bot."""
 
 import argparse
 import sys
@@ -18,6 +18,10 @@ def main():
     parser.add_argument("checkpoint")
     parser.add_argument("--config", default="configs/competition_cpu.yaml")
     parser.add_argument("--games", type=int, default=400)
+    parser.add_argument(
+        "--opponent", choices=("hunter", "expander", "random"),
+        default="hunter",
+    )
     parser.add_argument("--seed", type=int, default=20260805)
     parser.add_argument("--min-decisive-win-rate", type=float, default=0.70)
     parser.add_argument("--min-decisive-fraction", type=float, default=0.50)
@@ -39,12 +43,15 @@ def main():
     wins, losses, draws, _, wb, lb, split, _ = evaluate(
         env, agent.network, eval_key, env.truncation, n_maps, cfg.pad_to,
         obs_state, agent.augment_fn, agent.bundle["reset_obs_state"],
-        agent.greedy_fn, pool=pool, opponent_kind="expander")
+        agent.greedy_fn, pool=pool, opponent_kind=args.opponent)
     wins, losses, draws = int(wins), int(losses), int(draws)
     decisive = wins + losses
     decisive_wr = wins / max(decisive, 1)
     decisive_fraction = decisive / args.games
-    print(f"Expander: {wins}W/{losses}L/{draws}D; decisive WR={decisive_wr:.1%}; decisive={decisive_fraction:.1%}")
+    print(
+        f"{args.opponent.title()}: {wins}W/{losses}L/{draws}D; "
+        f"decisive WR={decisive_wr:.1%}; decisive={decisive_fraction:.1%}"
+    )
     print(f"Paired maps: {int(wb)} won-both / {int(lb)} lost-both / {int(split)} split")
     passed = decisive_wr >= args.min_decisive_win_rate and decisive_fraction >= args.min_decisive_fraction
     print("STRENGTH GATE: " + ("PASS" if passed else "FAIL"))

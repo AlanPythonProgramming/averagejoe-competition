@@ -88,7 +88,7 @@ python main.py --config configs/competition_cpu.yaml
 python export_torch.py checkpoints/competition_cpu/competition_cpu_best_ema.eqx \
   --config configs/competition_cpu.yaml --output submission
 python eval_competition.py checkpoints/competition_cpu/competition_cpu_best_ema.eqx \
-  --config configs/competition_cpu.yaml --games 400
+  --config configs/competition_cpu.yaml --games 400 --opponent hunter
 python package_submission.py --source submission --output averagejoe_submission.zip
 python ../generals-bots/competition/matchup.py \
   submission/run.sh ../generals-bots/competition/agents/expander_python/run.sh \
@@ -99,6 +99,10 @@ python ../generals-bots/competition/matchup.py \
 `competition_full.yaml` scales to the published AverageJoe model size. The
 submission uses ten action planes, strict legality masks, dynamic castle costs,
 four board-delta frames, and 64-turn opponent score histories.
+Random remains the curriculum opponent and advancement uses AverageJoe's raw
+win rate. GPU configs additionally report the EMA policy against Hunter and
+Expander every 250 iterations; these fixed-bot results do not affect curriculum
+advancement. `eval_competition.py --opponent ...` runs either check on demand.
 
 `L_7d_gae90` is the config behind the released agent. Checkpoints (a regular and an EMA copy)
 are written to `checkpoints/<run_name>/`, alongside the exact config that produced them. Any

@@ -8,10 +8,10 @@ from ruamel.yaml import YAML
 @dataclass
 class CurriculumStage:
     """A single curriculum stage. Advances to the next stage when eval
-    win-rate vs random >= win_rate_threshold of the *next* stage."""
+    raw win rate vs random >= win_rate_threshold of the *next* stage."""
     min_generals_distance: int
     max_generals_distance: int
-    win_rate_threshold: float = 0.85  # win-rate needed to advance *to* this stage
+    win_rate_threshold: float = 0.85  # raw win rate needed to advance to this stage
     castle_val_min: Optional[int] = None   # None = inherit from top-level config
     castle_val_max: Optional[int] = None
     num_cities_min: Optional[int] = None
@@ -109,6 +109,13 @@ class Config:
     eval_games: int = 128
     eval_pool_size: int = 1000
     eval_ema_only: bool = False  # if True, eval/ref_eval use only EMA weights (skip current)
+    # A stronger, non-curriculum benchmark. Random evaluation remains the sole
+    # curriculum signal, so this can change without altering stage progression.
+    strength_eval_opponent: str = ""  # "hunter" recommended for competition
+    strength_eval_opponents: Optional[list] = None  # e.g. [hunter, expander]
+    strength_eval_every: int = 0       # 0 disables the secondary benchmark
+    strength_eval_games: int = 128
+    strength_eval_use_ema: bool = True
     ckpt_every: int = 10
 
     # Reference ELO eval during training

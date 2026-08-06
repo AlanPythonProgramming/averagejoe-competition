@@ -56,5 +56,9 @@ ent_power: 0.2
 ent_coef_min: 0.001
 eval_every: 50
 eval_games: 512
+strength_eval_opponents: [hunter, expander]
+strength_eval_every: 250
+strength_eval_games: 256
+strength_eval_use_ema: true
 ckpt_every: 500
 save_every: 500
